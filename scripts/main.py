@@ -163,7 +163,7 @@ def build_model(hp):
     
     return model
 
-def train_model(model, train_data, val_data, hp):
+def train_model(model, train_data, val_data, hp, strategy):
     """Trains the model and returns the training history."""
     # Define callbacks
     callbacks = [
@@ -171,14 +171,20 @@ def train_model(model, train_data, val_data, hp):
         ModelCheckpoint(filepath=os.path.join(OUTPUTS_DIR, 'best_model.h5'), save_best_only=True)
     ]
 
-    # Train the model
-    history = model.fit(
-        train_data['images'], train_data['labels'],
-        validation_data=(val_data['images'], val_data['labels']),
-        epochs=hp['epochs'],
-        batch_size=hp['batch_size'],
-        callbacks=callbacks
-    )
+    with strategy.scope():
+        # Compile model inside the strategy scope
+        model.compile(optimizer=tf.keras.optimizers.Adam(learning_rate=hp['learning_rate']),
+                      loss='binary_crossentropy',
+                      metrics=['accuracy'])
+
+        # Train the model
+        history = model.fit(
+            train_data['images'], train_data['labels'],
+            validation_data=(val_data['images'], val_data['labels']),
+            epochs=hp['epochs'],
+            batch_size=hp['batch_size'],
+            callbacks=callbacks
+        )
 
     return history
 
@@ -265,6 +271,9 @@ def main():
     # Preprocess Data
     processed_data = preprocess_data(train_data, val_data, test_data)
 
+    # Initialize the strategy
+    strategy = tf.distribute.MirroredStrategy()
+
     # Tune Hyperparameters
     config = {
         'train_data': processed_data['train'],
@@ -283,7 +292,7 @@ def main():
     model = build_model({**best_hyperparams, 'classes': processed_data['classes']})
 
     # Train Model with best hyperparameters
-    history = train_model(model, processed_data['train'], processed_data['val'], best_hyperparams)
+    history = train_model(model, processed_data['train'], processed_data['val'], best_hyperparams, strategy)
 
     # Evaluate Model
     performance = evaluate_model(model, processed_data['test'])
@@ -293,6 +302,7 @@ def main():
     plot_confusion_matrix(cm, classes=processed_data['classes'], filename=os.path.join(FIGURES_DIR, 'confusion_matrix.png'))
     plot_jaccard_score(performance['jaccard_scores'], filename=os.path.join(FIGURES_DIR, 'jaccard_scores.png'))
     plot_loss_vs_epochs(history, filename=os.path.join(FIGURES_DIR, 'loss_vs_epochs.png'))
+
 
 if __name__ == "__main__":
     data = load_data()
