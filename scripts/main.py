@@ -13,6 +13,9 @@ import pyspark
 from tensorflow.keras.preprocessing.image import img_to_array
 from tensorflow.keras.models import Sequential
 from tensorflow.keras.layers import Conv2D, MaxPooling2D, Flatten, Dense, Dropout, InputLayer
+from tensorflow.keras.callbacks import EarlyStopping, ModelCheckpoint
+import seaborn as sns
+
 
 # Configuration
 DATA_DIR = 'data/raw/'
@@ -162,73 +165,132 @@ def build_model(hp):
 
 def train_model(model, train_data, val_data, hp):
     """Trains the model and returns the training history."""
-    # Placeholder for training the model
-    pass
+    # Define callbacks
+    callbacks = [
+        EarlyStopping(monitor='val_loss', patience=5, restore_best_weights=True),
+        ModelCheckpoint(filepath=os.path.join(OUTPUTS_DIR, 'best_model.h5'), save_best_only=True)
+    ]
+
+    # Train the model
+    history = model.fit(
+        train_data['images'], train_data['labels'],
+        validation_data=(val_data['images'], val_data['labels']),
+        epochs=hp['epochs'],
+        batch_size=hp['batch_size'],
+        callbacks=callbacks
+    )
+
+    return history
 
 def evaluate_model(model, test_data):
     """Evaluates the model and returns performance metrics."""
-    # Placeholder for evaluating the model
-    pass
+    # Predict on test data
+    predictions = model.predict(test_data['images'])
+    
+    # Binarize predictions (using a threshold of 0.5)
+    binary_predictions = (predictions > 0.5).astype(int)
+    
+    # Calculate Jaccard score for each label
+    jaccard_scores = jaccard_score(test_data['labels'], binary_predictions, average=None)
+    
+    # Calculate confusion matrix
+    cm = confusion_matrix(test_data['labels'].argmax(axis=1), binary_predictions.argmax(axis=1))
+    
+    performance = {
+        'jaccard_scores': jaccard_scores,
+        'confusion_matrix': cm
+    }
+    
+    return performance
 
 def plot_confusion_matrix(cm, classes, filename):
     """Plots and saves the confusion matrix."""
-    # Placeholder for plotting confusion matrix
-    pass
+    plt.figure(figsize=(10, 8))
+    sns.heatmap(cm, annot=True, fmt="d", cmap="Blues", xticklabels=classes, yticklabels=classes)
+    plt.xlabel('Predicted')
+    plt.ylabel('True')
+    plt.title('Confusion Matrix')
+    plt.savefig(filename)
+    plt.close()
 
 def plot_jaccard_score(jaccard_scores, filename):
     """Plots and saves the Jaccard scores."""
-    # Placeholder for plotting Jaccard scores
-    pass
+    plt.figure(figsize=(10, 8))
+    plt.bar(range(len(jaccard_scores)), jaccard_scores)
+    plt.xlabel('Label')
+    plt.ylabel('Jaccard Score')
+    plt.title('Jaccard Scores per Label')
+    plt.savefig(filename)
+    plt.close()
 
 def plot_loss_vs_epochs(history, filename):
     """Plots and saves the loss vs. epochs graph."""
-    # Placeholder for plotting loss vs. epochs
-    pass
+    plt.figure(figsize=(10, 8))
+    plt.plot(history.history['loss'], label='Training Loss')
+    plt.plot(history.history['val_loss'], label='Validation Loss')
+    plt.xlabel('Epochs')
+    plt.ylabel('Loss')
+    plt.title('Loss vs. Epochs')
+    plt.legend()
+    plt.savefig(filename)
+    plt.close()
 
 def tune_hyperparameters(config):
     """Tunes hyperparameters using Ray Tune."""
-    # Placeholder for hyperparameter tuning
-    pass
+    analysis = tune.run(
+        tune.with_parameters(train_model, train_data=config['train_data'], val_data=config['val_data']),
+        config=config['hyperparams'],
+        resources_per_trial={'cpu': 2, 'gpu': 0},
+        metric="val_loss",
+        mode="min",
+        num_samples=10
+    )
 
-def save_hyperparameters_performance(hyperparams, performance, filename):
+    return analysis
+
+def save_hyperparameters_performance(hyperparams, analysis, filename):
     """Saves the hyperparameters and their performance."""
-    # Placeholder for saving hyperparameters and performance
-    pass
+    best_hyperparams = analysis.get_best_config(metric="val_loss", mode="min")
+    best_result = analysis.best_result
+
+    # Save the best hyperparameters and their performance to a file
+    with open(filename, 'w') as f:
+        json.dump({'hyperparameters': best_hyperparams, 'performance': best_result}, f, indent=4)
 
 def main():
     # Load Data
-    train_data, val_data, test_data = load_data()
+    data = load_data()
+    train_data, val_data, test_data = data['train'], data['val'], data['test']
 
     # Preprocess Data
-    train_data, val_data, test_data = preprocess_data(train_data, val_data, test_data)
+    processed_data = preprocess_data(train_data, val_data, test_data)
 
     # Tune Hyperparameters
-    analysis = tune.run(
-        tune.with_parameters(train_model, train_data=train_data, val_data=val_data),
-        config=hyperparams,
-        resources_per_trial={'cpu': 2, 'gpu': 0},
-        metric="mean_accuracy",
-        mode="max"
-    )
+    config = {
+        'train_data': processed_data['train'],
+        'val_data': processed_data['val'],
+        'hyperparams': hyperparams
+    }
+    analysis = tune_hyperparameters(config)
 
     # Get best hyperparameters
-    best_hyperparams = analysis.get_best_config(metric="mean_accuracy", mode="max")
+    best_hyperparams = analysis.get_best_config(metric="val_loss", mode="min")
 
-    # Save best hyperparameters
+    # Save best hyperparameters and their performance
     save_hyperparameters_performance(best_hyperparams, analysis, os.path.join(OUTPUTS_DIR, 'best_hyperparams.json'))
 
     # Build Model with best hyperparameters
-    model = build_model(best_hyperparams)
+    model = build_model({**best_hyperparams, 'classes': processed_data['classes']})
 
     # Train Model with best hyperparameters
-    history = train_model(model, train_data, val_data, best_hyperparams)
+    history = train_model(model, processed_data['train'], processed_data['val'], best_hyperparams)
 
     # Evaluate Model
-    performance = evaluate_model(model, test_data)
+    performance = evaluate_model(model, processed_data['test'])
 
     # Plot Figures
-    cm = confusion_matrix(test_data.labels, model.predict(test_data.images))
-    plot_confusion_matrix(cm, classes=train_data.classes, filename=os.path.join(FIGURES_DIR, 'confusion_matrix.png'))
+    cm = performance['confusion_matrix']
+    plot_confusion_matrix(cm, classes=processed_data['classes'], filename=os.path.join(FIGURES_DIR, 'confusion_matrix.png'))
     plot_jaccard_score(performance['jaccard_scores'], filename=os.path.join(FIGURES_DIR, 'jaccard_scores.png'))
     plot_loss_vs_epochs(history, filename=os.path.join(FIGURES_DIR, 'loss_vs_epochs.png'))
 
@@ -245,3 +307,8 @@ if __name__ == "__main__":
     processed_data = preprocess_data(data['train'], data['val'], data['test'])
     model = build_model({**hyperparams, 'classes': processed_data['classes']})
     model.summary()
+    history = train_model(model, processed_data['train'], processed_data['val'], hyperparams)
+    print(history.history)
+    performance = evaluate_model(model, processed_data['test'])
+    print("Jaccard Scores:", performance['jaccard_scores'])
+    print("Confusion Matrix:\n", performance['confusion_matrix'])

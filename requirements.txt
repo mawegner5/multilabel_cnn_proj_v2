@@ -4,5 +4,4 @@ pandas
 scikit-learn
 matplotlib
 ray[tune]
-json
-apache-spark
+pyspark
