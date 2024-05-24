@@ -282,6 +282,34 @@ def save_hyperparameters_performance(hyperparams, analysis, filename):
     with open(filename, 'w') as f:
         json.dump({'hyperparameters': best_hyperparams, 'performance': best_result}, f, indent=4)
 
+
+def plot_comparison_chart(parallel_time, non_parallel_time, parallel_memory, non_parallel_memory, parallel_cpu, non_parallel_cpu, filename):
+    """Plots and saves the comparison chart for training speed and resource usage."""
+    labels = ['Training Time', 'Memory Usage', 'CPU Usage']
+    parallel = [parallel_time, parallel_memory.percent, parallel_cpu]
+    non_parallel = [non_parallel_time, non_parallel_memory.percent, non_parallel_cpu]
+
+    x = np.arange(len(labels))  # the label locations
+    width = 0.35  # the width of the bars
+
+    fig, ax = plt.subplots(figsize=(10, 8))
+    rects1 = ax.bar(x - width/2, parallel, width, label='Parallel')
+    rects2 = ax.bar(x + width/2, non_parallel, width, label='Non-Parallel')
+
+    # Add some text for labels, title and custom x-axis tick labels, etc.
+    ax.set_xlabel('Metrics')
+    ax.set_title('Training Speed and Resource Usage Comparison')
+    ax.set_xticks(x)
+    ax.set_xticklabels(labels)
+    ax.legend()
+
+    ax.bar_label(rects1, padding=3)
+    ax.bar_label(rects2, padding=3)
+
+    fig.tight_layout()
+    plt.savefig(filename)
+    plt.close()
+
 def main():
     # Load Data
     data = load_data()
@@ -323,6 +351,9 @@ def main():
     print(f"CPU usage without parallel processing: {cpu_non_parallel}%")
     print(f"GPU usage with parallel processing: {gpu_parallel}")
     print(f"GPU usage without parallel processing: {gpu_non_parallel}")
+
+    # Plot comparison chart
+    plot_comparison_chart(time_parallel, time_non_parallel, memory_parallel, memory_non_parallel, cpu_parallel, cpu_non_parallel, os.path.join(FIGURES_DIR, 'comparison_chart.png'))
 
     # Evaluate Model
     performance = evaluate_model(model, processed_data['test'])
