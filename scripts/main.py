@@ -15,7 +15,8 @@ from tensorflow.keras.models import Sequential
 from tensorflow.keras.layers import Conv2D, MaxPooling2D, Flatten, Dense, Dropout, InputLayer
 from tensorflow.keras.callbacks import EarlyStopping, ModelCheckpoint
 import seaborn as sns
-
+import time
+import psutil
 
 # Configuration
 DATA_DIR = 'data/raw/'
@@ -163,7 +164,7 @@ def build_model(hp):
     
     return model
 
-def train_model(model, train_data, val_data, hp, strategy):
+def train_model(model, train_data, val_data, hp, strategy=None):
     """Trains the model and returns the training history."""
     # Define callbacks
     callbacks = [
@@ -171,12 +172,24 @@ def train_model(model, train_data, val_data, hp, strategy):
         ModelCheckpoint(filepath=os.path.join(OUTPUTS_DIR, 'best_model.h5'), save_best_only=True)
     ]
 
-    with strategy.scope():
-        # Compile model inside the strategy scope
-        model.compile(optimizer=tf.keras.optimizers.Adam(learning_rate=hp['learning_rate']),
-                      loss='binary_crossentropy',
-                      metrics=['accuracy'])
-
+    if strategy:
+        with strategy.scope():
+            # Compile model inside the strategy scope
+            model.compile(optimizer=tf.keras.optimizers.Adam(learning_rate=hp['learning_rate']),
+                          loss='binary_crossentropy',
+                          metrics=['accuracy'])
+            start_time = time.time()
+            # Train the model
+            history = model.fit(
+                train_data['images'], train_data['labels'],
+                validation_data=(val_data['images'], val_data['labels']),
+                epochs=hp['epochs'],
+                batch_size=hp['batch_size'],
+                callbacks=callbacks
+            )
+            end_time = time.time()
+    else:
+        start_time = time.time()
         # Train the model
         history = model.fit(
             train_data['images'], train_data['labels'],
@@ -185,8 +198,14 @@ def train_model(model, train_data, val_data, hp, strategy):
             batch_size=hp['batch_size'],
             callbacks=callbacks
         )
+        end_time = time.time()
 
-    return history
+    # Measure computational power used
+    memory_info = psutil.virtual_memory()
+    cpu_usage = psutil.cpu_percent(interval=1)
+    gpu_usage = tf.config.experimental.get_memory_info('GPU:0')
+
+    return history, end_time - start_time, memory_info, cpu_usage, gpu_usage
 
 def evaluate_model(model, test_data):
     """Evaluates the model and returns performance metrics."""
@@ -291,8 +310,19 @@ def main():
     # Build Model with best hyperparameters
     model = build_model({**best_hyperparams, 'classes': processed_data['classes']})
 
-    # Train Model with best hyperparameters
-    history = train_model(model, processed_data['train'], processed_data['val'], best_hyperparams, strategy)
+    # Train Model with and without parallel processing
+    history_parallel, time_parallel, memory_parallel, cpu_parallel, gpu_parallel = train_model(model, processed_data['train'], processed_data['val'], best_hyperparams, strategy)
+    history_non_parallel, time_non_parallel, memory_non_parallel, cpu_non_parallel, gpu_non_parallel = train_model(model, processed_data['train'], processed_data['val'], best_hyperparams)
+
+    # Output training times and computational resources
+    print(f"Training time with parallel processing: {time_parallel} seconds")
+    print(f"Training time without parallel processing: {time_non_parallel} seconds")
+    print(f"Memory usage with parallel processing: {memory_parallel}")
+    print(f"Memory usage without parallel processing: {memory_non_parallel}")
+    print(f"CPU usage with parallel processing: {cpu_parallel}%")
+    print(f"CPU usage without parallel processing: {cpu_non_parallel}%")
+    print(f"GPU usage with parallel processing: {gpu_parallel}")
+    print(f"GPU usage without parallel processing: {gpu_non_parallel}")
 
     # Evaluate Model
     performance = evaluate_model(model, processed_data['test'])
@@ -301,7 +331,8 @@ def main():
     cm = performance['confusion_matrix']
     plot_confusion_matrix(cm, classes=processed_data['classes'], filename=os.path.join(FIGURES_DIR, 'confusion_matrix.png'))
     plot_jaccard_score(performance['jaccard_scores'], filename=os.path.join(FIGURES_DIR, 'jaccard_scores.png'))
-    plot_loss_vs_epochs(history, filename=os.path.join(FIGURES_DIR, 'loss_vs_epochs.png'))
+    plot_loss_vs_epochs(history_parallel, filename=os.path.join(FIGURES_DIR, 'loss_vs_epochs_parallel.png'))
+    plot_loss_vs_epochs(history_non_parallel, filename=os.path.join(FIGURES_DIR, 'loss_vs_epochs_non_parallel.png'))
 
 
 if __name__ == "__main__":
@@ -314,11 +345,14 @@ if __name__ == "__main__":
     print("Processed validation data shape:", processed_data['val']['images'].shape, processed_data['val']['labels'].shape)
     print("Processed test data shape:", processed_data['test']['images'].shape, processed_data['test']['labels'].shape)
     print("Label classes:", processed_data['classes'])
-    processed_data = preprocess_data(data['train'], data['val'], data['test'])
     model = build_model({**hyperparams, 'classes': processed_data['classes']})
     model.summary()
-    history = train_model(model, processed_data['train'], processed_data['val'], hyperparams)
-    print(history.history)
+    history_parallel, time_parallel, memory_parallel, cpu_parallel, gpu_parallel = train_model(model, processed_data['train'], processed_data['val'], hyperparams, tf.distribute.MirroredStrategy())
+    history_non_parallel, time_non_parallel, memory_non_parallel, cpu_non_parallel, gpu_non_parallel = train_model(model, processed_data['train'], processed_data['val'], hyperparams)
+    print(history_parallel.history)
+    print(history_non_parallel.history)
     performance = evaluate_model(model, processed_data['test'])
     print("Jaccard Scores:", performance['jaccard_scores'])
     print("Confusion Matrix:\n", performance['confusion_matrix'])
+    plot_loss_vs_epochs(history_parallel, filename=os.path.join(FIGURES_DIR, 'loss_vs_epochs_parallel.png'))
+    plot_loss_vs_epochs(history_non_parallel, filename=os.path.join(FIGURES_DIR, 'loss_vs_epochs_non_parallel.png'))
