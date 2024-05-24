@@ -1,0 +1,41 @@
+# Ignore raw data files
+data/raw/*
+
+# Ignore processed data files (optional, if you don't want to include them)
+# data/processed/*
+
+# Ignore splits (optional, if you don't want to include them)
+# data/splits/*
+
+# Ignore saved models (optional, if you want to regenerate them each time)
+# models/saved_models/*
+
+# Ignore figures and logs (optional)
+# results/figures/*
+# results/logs/*
+
+# Ignore Jupyter Notebook checkpoints
+notebooks/.ipynb_checkpoints
+
+# Ignore compiled Python files
+__pycache__/
+*.py[cod]
+
+# Ignore virtual environment directories
+venv/
+env/
+
+# Ignore IDE and editor files
+.vscode/
+.idea/
+*.swp
+*~
+*.sublime-project
+*.sublime-workspace
+
+# Ignore system files
+.DS_Store
+Thumbs.db
+
+# Ignore any other specific files or directories
+# Add any other files or directories you want to ignore
