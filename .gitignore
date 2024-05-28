@@ -1,5 +1,6 @@
-# Ignore raw data files
+# Ignore raw data files, but not Corel-5k.zip
 data/raw/*
+!data/raw/Corel-5k.zip
 
 # Ignore processed data files (optional, if you don't want to include them)
 # data/processed/*
