@@ -40,3 +40,10 @@ Thumbs.db
 
 # Ignore any other specific files or directories
 # Add any other files or directories you want to ignore
+outputs/best_model.h5
+data/processed/val_images.npy
+data/processed/train_images.npy
+data/processed/test_images.npy
+data/Corel-5k.zip
+data/raw/Corel-5k/Corel-5k/Corel-5k/images.zip
+data/raw/Corel-5k/Corel-5k/images.zip
