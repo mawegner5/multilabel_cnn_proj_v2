@@ -13,25 +13,21 @@ import zipfile
 import time
 import matplotlib.pyplot as plt
 import seaborn as sns
-from sklearn.metrics import jaccard_score, confusion_matrix
+from sklearn.metrics import jaccard_score, confusion_matrix, accuracy_score
+from ray import tune
+
+# Try importing the newer callback; fallback to the older one if there's an import issue
+try:
+    from ray.train.tensorflow.keras import ReportCheckpointCallback
+except ImportError:
+    logging.warning("Falling back to TuneReportCallback due to import error with ReportCheckpointCallback.")
+    from ray.tune.integration.keras import TuneReportCallback
 
 # Configuration
 DATA_DIR = 'data/raw/Corel-5k/Corel-5k/'
 PROCESSED_DIR = 'data/processed/'
 OUTPUTS_DIR = 'outputs/'
 FIGURES_DIR = 'figures/'
-
-# Hyperparameters
-hyperparams = {
-    'batch_size': 32,
-    'epochs': 50,
-    'learning_rate': 0.001,
-    'dropout_rate': 0.5,
-    'num_filters': [32, 64, 128],
-    'kernel_size': 3,
-    'pool_size': 2,
-    'dense_units': 128
-}
 
 # Set up logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -170,53 +166,44 @@ def save_preprocessed_data(data, processed_dir):
         logging.error(f"An error occurred while saving preprocessed data: {e}")
         raise
 
-def build_model(input_shape, num_classes, hyperparams, strategy):
-    """Builds and compiles the CNN model within the strategy scope."""
-    with strategy.scope():
-        model = Sequential()
-        model.add(InputLayer(input_shape=input_shape))
+def build_model(config):
+    """Builds and compiles the CNN model."""
+    model = Sequential()
+    model.add(InputLayer(input_shape=(224, 224, 3)))
 
-        for num_filter in hyperparams['num_filters']:
-            model.add(Conv2D(num_filter, (hyperparams['kernel_size'], hyperparams['kernel_size']), activation='relu'))
-            model.add(MaxPooling2D(pool_size=(hyperparams['pool_size'], hyperparams['pool_size'])))
-            model.add(Dropout(hyperparams['dropout_rate']))
-        
-        model.add(Flatten())
-        model.add(Dense(hyperparams['dense_units'], activation='relu'))
-        model.add(Dropout(hyperparams['dropout_rate']))
-        model.add(Dense(num_classes, activation='sigmoid'))
+    for num_filter in config['num_filters']:
+        model.add(Conv2D(num_filter, (config['kernel_size'], config['kernel_size']), activation='relu'))
+        model.add(MaxPooling2D(pool_size=(config['pool_size'], config['pool_size'])))
+        model.add(Dropout(config['dropout_rate']))
 
-        model.compile(optimizer=tf.keras.optimizers.Adam(learning_rate=hyperparams['learning_rate']),
-                      loss='binary_crossentropy',
-                      metrics=['accuracy'])
+    model.add(Flatten())
+    model.add(Dense(config['dense_units'], activation='relu'))
+    model.add(Dropout(config['dropout_rate']))
+    model.add(Dense(260, activation='sigmoid'))
 
-        logging.info("Model built and compiled successfully.")
-        return model
+    model.compile(optimizer=tf.keras.optimizers.Adam(learning_rate=config['learning_rate']),
+                  loss='binary_crossentropy',
+                  metrics=['accuracy'])
 
-def train_model(model, train_data, val_data, hyperparams, strategy):
-    """Trains the model and returns the training history."""
-    try:
-        callbacks = [
-            EarlyStopping(monitor='val_loss', patience=3, restore_best_weights=True),
-            ModelCheckpoint(filepath=os.path.join(OUTPUTS_DIR, 'best_model.h5'), save_best_only=True)
+    return model
+
+def train_model(config, data):
+    """Trains the model with the given configuration and data."""
+    model = build_model(config)
+    start_time = time.time()
+    history = model.fit(
+        data['train']['images'], data['train']['labels'],
+        validation_data=(data['val']['images'], data['val']['labels']),
+        epochs=config['epochs'],
+        batch_size=config['batch_size'],
+        callbacks=[
+            TuneReportCallback(metrics={'val_loss': 'val_loss', 'val_accuracy': 'val_accuracy'}),
+            EarlyStopping(monitor='val_loss', patience=3, restore_best_weights=True)
         ]
-
-        with strategy.scope():
-            start_time = time.time()
-            history = model.fit(
-                train_data['images'], train_data['labels'],
-                validation_data=(val_data['images'], val_data['labels']),
-                epochs=hyperparams['epochs'],
-                batch_size=hyperparams['batch_size'],
-                callbacks=callbacks
-            )
-            end_time = time.time()
-
-        return history, end_time - start_time
-
-    except Exception as e:
-        logging.error(f"An error occurred while training the model: {e}")
-        raise
+    )
+    end_time = time.time()
+    training_time = end_time - start_time
+    return history, training_time
 
 def evaluate_model(model, test_data):
     """Evaluates the model and returns performance metrics."""
@@ -224,13 +211,15 @@ def evaluate_model(model, test_data):
         predictions = model.predict(test_data['images'])
         binary_predictions = (predictions > 0.5).astype(int)
         jaccard_scores = jaccard_score(test_data['labels'], binary_predictions, average=None)
+        overall_jaccard = jaccard_score(test_data['labels'], binary_predictions, average='micro')
         cm = confusion_matrix(test_data['labels'].argmax(axis=1), binary_predictions.argmax(axis=1))
-        
+
         performance = {
             'jaccard_scores': jaccard_scores,
+            'overall_jaccard': overall_jaccard,
             'confusion_matrix': cm
         }
-        
+
         return performance
 
     except Exception as e:
@@ -238,7 +227,7 @@ def evaluate_model(model, test_data):
         raise
 
 def plot_confusion_matrix(cm, classes, filename):
-    plt.figure(figsize=(10, 8))
+    plt.figure(figsize=(20, 20))
     sns.heatmap(cm, annot=True, fmt="d", cmap="Blues", xticklabels=classes, yticklabels=classes)
     plt.xlabel('Predicted')
     plt.ylabel('True')
@@ -246,12 +235,13 @@ def plot_confusion_matrix(cm, classes, filename):
     plt.savefig(filename)
     plt.close()
 
-def plot_jaccard_score(jaccard_scores, filename):
+def plot_jaccard_score(jaccard_scores, classes, filename):
     plt.figure(figsize=(10, 8))
-    plt.bar(range(len(jaccard_scores)), jaccard_scores)
+    plt.bar(classes, jaccard_scores)
     plt.xlabel('Label')
     plt.ylabel('Jaccard Score')
     plt.title('Jaccard Scores per Label')
+    plt.xticks(rotation=90)
     plt.savefig(filename)
     plt.close()
 
@@ -268,7 +258,7 @@ def plot_loss_vs_epochs(history, filename):
 
 def main():
     try:
-        extract_zip('data/Corel-5k.zip', 'data/raw/Corel-5k/')
+        extract_zip('/root/.ipython/multilabel_cnn_proj/data/raw/Corel-5k.zip', 'data/raw/Corel-5k/')
         
         logging.info("Loading data...")
         data = load_data()
@@ -280,13 +270,38 @@ def main():
         save_preprocessed_data(processed_data, PROCESSED_DIR)
 
         logging.info("Building the model...")
-        input_shape = processed_data['train']['images'][0].shape
-        num_classes = len(processed_data['classes'])
         strategy = tf.distribute.MirroredStrategy()
-        model = build_model(input_shape, num_classes, hyperparams, strategy)
 
-        logging.info("Training the model...")
-        history, training_time = train_model(model, processed_data['train'], processed_data['val'], hyperparams, strategy)
+        # Define the hyperparameter search space
+        search_space = {
+            'batch_size': tune.choice([16, 32, 64]),
+            'epochs': 50,
+            'learning_rate': tune.loguniform(1e-4, 1e-2),
+            'dropout_rate': tune.uniform(0.3, 0.7),
+            'num_filters': tune.choice([[32, 64, 128], [64, 128, 256], [128, 256, 512]]),
+            'kernel_size': 3,
+            'pool_size': 2,
+            'dense_units': tune.choice([64, 128, 256])
+        }
+
+        # Run the hyperparameter search
+        analysis = tune.run(
+            tune.with_parameters(train_model, data=processed_data),
+            resources_per_trial={'cpu': 2, 'gpu': 1},
+            metric='val_loss',
+            mode='min',
+            config=search_space,
+            num_samples=10,
+            name='tune_cnn'
+        )
+
+        # Get the best hyperparameters
+        best_config = analysis.best_config
+        logging.info(f"Best hyperparameters: {best_config}")
+
+        # Train the final model with the best hyperparameters
+        model = build_model(best_config)
+        history, training_time = train_model(best_config, processed_data)
 
         logging.info("Data preprocessing and model training pipeline completed successfully.")
 
@@ -300,10 +315,12 @@ def main():
         plot_confusion_matrix(performance['confusion_matrix'], classes=processed_data['classes'], filename=os.path.join(FIGURES_DIR, 'confusion_matrix.png'))
 
         logging.info("Plotting Jaccard scores...")
-        plot_jaccard_score(performance['jaccard_scores'], filename=os.path.join(FIGURES_DIR, 'jaccard_scores.png'))
+        plot_jaccard_score(performance['jaccard_scores'], classes=processed_data['classes'], filename=os.path.join(FIGURES_DIR, 'jaccard_scores.png'))
 
         logging.info("Plotting loss vs. epochs...")
         plot_loss_vs_epochs(history, filename=os.path.join(FIGURES_DIR, 'loss_vs_epochs.png'))
+
+        logging.info(f"Overall Jaccard score: {performance['overall_jaccard']:.4f}")
 
         logging.info("Training time with parallel strategy: %s seconds", training_time)
 

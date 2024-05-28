@@ -12,7 +12,7 @@ import logging
 import zipfile
 
 # Configuration
-DATA_DIR = '/root/.ipython/multilabel_cnn_proj/data/raw/Corel-5k/Corel-5k/Corel-5k/'
+DATA_DIR = '/root/.ipython/multilabel_cnn_proj/data/raw/Corel-5k/Corel-5k/'
 PROCESSED_DIR = '/root/.ipython/multilabel_cnn_proj/data/processed/'
 OUTPUTS_DIR = '/root/.ipython/multilabel_cnn_proj/outputs/'
 
@@ -33,6 +33,8 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 
 def extract_zip(file_path, extract_to):
     try:
+        if not os.path.exists(file_path):
+            raise FileNotFoundError(f"{file_path} does not exist")
         with zipfile.ZipFile(file_path, 'r') as zip_ref:
             zip_ref.extractall(extract_to)
         logging.info(f"Extracted {file_path} to {extract_to}.")
@@ -229,7 +231,16 @@ def train_model(model, train_data, val_data, hyperparams):
 
 if __name__ == "__main__":
     try:
-        extract_zip('/root/.ipython/multilabel_cnn_proj/data/Corel-5k.zip', '/root/.ipython/multilabel_cnn_proj/data/raw/Corel-5k/')
+        # Correct path to the zip file
+        zip_file_path = '/root/.ipython/multilabel_cnn_proj/data/raw/Corel-5k.zip'
+        extract_to_path = '/root/.ipython/multilabel_cnn_proj/data/raw/Corel-5k/'
+
+        # Remove existing raw data directory if it exists
+        if os.path.exists(extract_to_path):
+            logging.info("Removing existing raw data directory...")
+            os.system(f'rm -rf {extract_to_path}')
+
+        extract_zip(zip_file_path, extract_to_path)
         
         logging.info("Loading data...")
         data = load_data()
