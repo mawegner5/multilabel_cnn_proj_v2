@@ -1,49 +1,16 @@
-# Ignore raw data files, but not Corel-5k.zip
-data/raw/*
-!data/raw/Corel-5k.zip
-
-# Ignore processed data files (optional, if you don't want to include them)
-# data/processed/*
-
-# Ignore splits (optional, if you don't want to include them)
-# data/splits/*
-
-# Ignore saved models (optional, if you want to regenerate them each time)
-# models/saved_models/*
-
-# Ignore figures and logs (optional)
-# results/figures/*
-# results/logs/*
-
-# Ignore Jupyter Notebook checkpoints
-notebooks/.ipynb_checkpoints
-
-# Ignore compiled Python files
-__pycache__/
-*.py[cod]
-
-# Ignore virtual environment directories
-venv/
-env/
-
-# Ignore IDE and editor files
-.vscode/
-.idea/
-*.swp
-*~
-*.sublime-project
-*.sublime-workspace
-
-# Ignore system files
-.DS_Store
-Thumbs.db
-
-# Ignore any other specific files or directories
-# Add any other files or directories you want to ignore
+# Ignore model outputs
 outputs/best_model.h5
-data/processed/val_images.npy
+
+# Ignore processed data
 data/processed/train_images.npy
+data/processed/val_images.npy
 data/processed/test_images.npy
-data/Corel-5k.zip
-data/raw/Corel-5k/Corel-5k/Corel-5k/images.zip
-data/raw/Corel-5k/Corel-5k/images.zip
+data/processed/train_labels.npy
+data/processed/val_labels.npy
+data/processed/test_labels.npy
+
+# Ignore raw data archives
+data/raw/Corel-5k.zip
+
+# Ignore extracted raw data
+data/raw/Corel-5k/Corel-5k/images/*
