@@ -7,21 +7,13 @@ from sklearn.model_selection import train_test_split
 from tensorflow.keras.preprocessing.image import img_to_array
 from tensorflow.keras.models import Sequential
 from tensorflow.keras.layers import Conv2D, MaxPooling2D, Flatten, Dense, Dropout, InputLayer
-from tensorflow.keras.callbacks import EarlyStopping, ModelCheckpoint
+from tensorflow.keras.callbacks import EarlyStopping
 import logging
 import zipfile
 import time
 import matplotlib.pyplot as plt
 import seaborn as sns
-from sklearn.metrics import jaccard_score, confusion_matrix, accuracy_score
-from ray import tune
-
-# Try importing the newer callback; fallback to the older one if there's an import issue
-try:
-    from ray.train.tensorflow.keras import ReportCheckpointCallback
-except ImportError:
-    logging.warning("Falling back to TuneReportCallback due to import error with ReportCheckpointCallback.")
-    from ray.tune.integration.keras import TuneReportCallback
+from sklearn.metrics import jaccard_score, confusion_matrix
 
 # Configuration
 DATA_DIR = 'data/raw/Corel-5k/Corel-5k/'
@@ -30,7 +22,7 @@ OUTPUTS_DIR = 'outputs/'
 FIGURES_DIR = 'figures/'
 
 # Set up logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levellevelname)evel - %(message)s')
 
 def extract_zip(file_path, extract_to):
     """Extracts a zip file to the specified directory."""
@@ -179,40 +171,58 @@ def build_model(config):
     model.add(Flatten())
     model.add(Dense(config['dense_units'], activation='relu'))
     model.add(Dropout(config['dropout_rate']))
-    model.add(Dense(260, activation='sigmoid'))
+    model.add(Dense(260, activation='sigmoid'))  # Sigmoid activation for multi-label classification
 
     model.compile(optimizer=tf.keras.optimizers.Adam(learning_rate=config['learning_rate']),
-                  loss='binary_crossentropy',
+                  loss='binary_crossentropy',  # Use binary cross-entropy loss
                   metrics=['accuracy'])
 
     return model
 
-def train_model(config, data):
-    """Trains the model with the given configuration and data."""
-    model = build_model(config)
-    start_time = time.time()
-    history = model.fit(
-        data['train']['images'], data['train']['labels'],
-        validation_data=(data['val']['images'], data['val']['labels']),
-        epochs=config['epochs'],
-        batch_size=config['batch_size'],
-        callbacks=[
-            TuneReportCallback(metrics={'val_loss': 'val_loss', 'val_accuracy': 'val_accuracy'}),
-            EarlyStopping(monitor='val_loss', patience=3, restore_best_weights=True)
-        ]
-    )
-    end_time = time.time()
-    training_time = end_time - start_time
-    return history, training_time
+def train_model(config, data, use_parallel_strategy):
+    """Trains the CNN model with the given configuration and data."""
+    try:
+        train_images = data['train']['images']
+        train_labels = data['train']['labels']
+        val_images = data['val']['images']
+        val_labels = data['val']['labels']
+
+        if use_parallel_strategy:
+            strategy = tf.distribute.MirroredStrategy()
+            with strategy.scope():
+                model = build_model(config)
+        else:
+            model = build_model(config)
+
+        early_stopping = EarlyStopping(monitor='val_loss', patience=5, restore_best_weights=True)
+
+        start_time = time.time()
+        history = model.fit(train_images, train_labels,
+                            validation_data=(val_images, val_labels),
+                            epochs=config['epochs'],
+                            batch_size=config['batch_size'],
+                            callbacks=[early_stopping])
+        training_time = time.time() - start_time
+
+        return model, history, training_time
+    
+    except Exception as e:
+        logging.error(f"An error occurred during training: {e}")
+        raise
 
 def evaluate_model(model, test_data):
-    """Evaluates the model and returns performance metrics."""
+    """Evaluates the trained model on the test data."""
     try:
-        predictions = model.predict(test_data['images'])
-        binary_predictions = (predictions > 0.5).astype(int)
-        jaccard_scores = jaccard_score(test_data['labels'], binary_predictions, average=None)
-        overall_jaccard = jaccard_score(test_data['labels'], binary_predictions, average='micro')
-        cm = confusion_matrix(test_data['labels'].argmax(axis=1), binary_predictions.argmax(axis=1))
+        test_images = test_data['images']
+        test_labels = test_data['labels']
+
+        predictions = model.predict(test_images)
+        jaccard_scores = jaccard_score(test_labels, np.round(predictions), average=None)
+        overall_jaccard = jaccard_score(test_labels, np.round(predictions), average='micro')
+
+        y_true = test_labels.argmax(axis=1)
+        y_pred = predictions.argmax(axis=1)
+        cm = confusion_matrix(y_true, y_pred)
 
         performance = {
             'jaccard_scores': jaccard_scores,
@@ -221,27 +231,26 @@ def evaluate_model(model, test_data):
         }
 
         return performance
-
+    
     except Exception as e:
-        logging.error(f"An error occurred while evaluating the model: {e}")
+        logging.error(f"An error occurred during evaluation: {e}")
         raise
 
-def plot_confusion_matrix(cm, classes, filename):
-    plt.figure(figsize=(20, 20))
-    sns.heatmap(cm, annot=True, fmt="d", cmap="Blues", xticklabels=classes, yticklabels=classes)
+def plot_confusion_matrix(cm, filename):
+    normalized_cm = cm.astype('float') / cm.sum(axis=1)[:, np.newaxis]
+    plt.figure(figsize=(10, 8))
+    sns.heatmap(normalized_cm, annot=True, fmt=".2f", cmap="Blues", xticklabels=['Non-Relevant', 'Relevant'], yticklabels=['Non-Relevant', 'Relevant'])
     plt.xlabel('Predicted')
     plt.ylabel('True')
-    plt.title('Confusion Matrix')
+    plt.title('Normalized Confusion Matrix')
     plt.savefig(filename)
     plt.close()
 
-def plot_jaccard_score(jaccard_scores, classes, filename):
+def plot_overall_jaccard_score(overall_jaccard, filename):
     plt.figure(figsize=(10, 8))
-    plt.bar(classes, jaccard_scores)
-    plt.xlabel('Label')
+    plt.bar(['Overall Jaccard Score'], [overall_jaccard])
     plt.ylabel('Jaccard Score')
-    plt.title('Jaccard Scores per Label')
-    plt.xticks(rotation=90)
+    plt.title('Overall Jaccard Score')
     plt.savefig(filename)
     plt.close()
 
@@ -270,59 +279,49 @@ def main():
         save_preprocessed_data(processed_data, PROCESSED_DIR)
 
         logging.info("Building the model...")
-        strategy = tf.distribute.MirroredStrategy()
 
-        # Define the hyperparameter search space
-        search_space = {
-            'batch_size': tune.choice([16, 32, 64]),
-            'epochs': 50,
-            'learning_rate': tune.loguniform(1e-4, 1e-2),
-            'dropout_rate': tune.uniform(0.3, 0.7),
-            'num_filters': tune.choice([[32, 64, 128], [64, 128, 256], [128, 256, 512]]),
+        # Hyperparameters configuration
+        config = {
+            'batch_size': 16,
+            'epochs': 20,
+            'learning_rate': 0.001,
+            'dropout_rate': 0.4,
+            'num_filters': [32, 64],
             'kernel_size': 3,
             'pool_size': 2,
-            'dense_units': tune.choice([64, 128, 256])
+            'dense_units': 64
         }
 
-        # Run the hyperparameter search
-        analysis = tune.run(
-            tune.with_parameters(train_model, data=processed_data),
-            resources_per_trial={'cpu': 2, 'gpu': 1},
-            metric='val_loss',
-            mode='min',
-            config=search_space,
-            num_samples=10,
-            name='tune_cnn'
-        )
+        # Train with parallel strategy
+        logging.info("Training with parallel strategy...")
+        _, history_parallel, training_time_parallel = train_model(config, processed_data, use_parallel_strategy=True)
+        logging.info("Training time with parallel strategy: %s seconds", training_time_parallel)
 
-        # Get the best hyperparameters
-        best_config = analysis.best_config
-        logging.info(f"Best hyperparameters: {best_config}")
-
-        # Train the final model with the best hyperparameters
-        model = build_model(best_config)
-        history, training_time = train_model(best_config, processed_data)
-
-        logging.info("Data preprocessing and model training pipeline completed successfully.")
+        # Train without parallel strategy
+        logging.info("Training without parallel strategy...")
+        _, history_non_parallel, training_time_non_parallel = train_model(config, processed_data, use_parallel_strategy=False)
+        logging.info("Training time without parallel strategy: %s seconds", training_time_non_parallel)
 
         logging.info("Evaluating the model...")
+        model, _, _ = train_model(config, processed_data, use_parallel_strategy=False)  # Train the final model
         performance = evaluate_model(model, processed_data['test'])
 
         logging.info("Creating figures directory if it does not exist...")
         os.makedirs(FIGURES_DIR, exist_ok=True)
 
         logging.info("Plotting confusion matrix...")
-        plot_confusion_matrix(performance['confusion_matrix'], classes=processed_data['classes'], filename=os.path.join(FIGURES_DIR, 'confusion_matrix.png'))
+        plot_confusion_matrix(performance['confusion_matrix'], filename=os.path.join(FIGURES_DIR, 'confusion_matrix.png'))
 
-        logging.info("Plotting Jaccard scores...")
-        plot_jaccard_score(performance['jaccard_scores'], classes=processed_data['classes'], filename=os.path.join(FIGURES_DIR, 'jaccard_scores.png'))
+        logging.info("Plotting overall Jaccard score...")
+        plot_overall_jaccard_score(performance['overall_jaccard'], filename=os.path.join(FIGURES_DIR, 'overall_jaccard_score.png'))
 
         logging.info("Plotting loss vs. epochs...")
-        plot_loss_vs_epochs(history, filename=os.path.join(FIGURES_DIR, 'loss_vs_epochs.png'))
+        plot_loss_vs_epochs(history_non_parallel, filename=os.path.join(FIGURES_DIR, 'loss_vs_epochs.png'))
 
         logging.info(f"Overall Jaccard score: {performance['overall_jaccard']:.4f}")
 
-        logging.info("Training time with parallel strategy: %s seconds", training_time)
+        logging.info("Training time with parallel strategy: %s seconds", training_time_parallel)
+        logging.info("Training time without parallel strategy: %s seconds", training_time_non_parallel)
 
     except Exception as e:
         logging.error(f"An error occurred in the preprocessing and training pipeline: {e}")
