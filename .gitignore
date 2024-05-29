@@ -2,12 +2,7 @@
 outputs/best_model.h5
 
 # Ignore processed data
-data/processed/train_images.npy
-data/processed/val_images.npy
-data/processed/test_images.npy
-data/processed/train_labels.npy
-data/processed/val_labels.npy
-data/processed/test_labels.npy
+/root/.ipython/multilabel_cnn_proj/data/
 
 # Ignore raw data archives
 data/raw/Corel-5k.zip
