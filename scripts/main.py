@@ -21,8 +21,18 @@ PROCESSED_DIR = 'data/processed/'
 OUTPUTS_DIR = 'outputs/'
 FIGURES_DIR = 'figures/'
 
+# Hyperparameters configuration
+BATCH_SIZE = 16
+EPOCHS = 20
+LEARNING_RATE = 0.001
+DROPOUT_RATE = 0.4
+NUM_FILTERS = [32, 64]
+KERNEL_SIZE = 3
+POOL_SIZE = 2
+DENSE_UNITS = 64
+
 # Set up logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levellevelname)evel - %(message)s')
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 def extract_zip(file_path, extract_to):
     """Extracts a zip file to the specified directory."""
@@ -158,28 +168,28 @@ def save_preprocessed_data(data, processed_dir):
         logging.error(f"An error occurred while saving preprocessed data: {e}")
         raise
 
-def build_model(config):
+def build_model():
     """Builds and compiles the CNN model."""
     model = Sequential()
     model.add(InputLayer(input_shape=(224, 224, 3)))
 
-    for num_filter in config['num_filters']:
-        model.add(Conv2D(num_filter, (config['kernel_size'], config['kernel_size']), activation='relu'))
-        model.add(MaxPooling2D(pool_size=(config['pool_size'], config['pool_size'])))
-        model.add(Dropout(config['dropout_rate']))
+    for num_filter in NUM_FILTERS:
+        model.add(Conv2D(num_filter, (KERNEL_SIZE, KERNEL_SIZE), activation='relu'))
+        model.add(MaxPooling2D(pool_size=(POOL_SIZE, POOL_SIZE)))
+        model.add(Dropout(DROPOUT_RATE))
 
     model.add(Flatten())
-    model.add(Dense(config['dense_units'], activation='relu'))
-    model.add(Dropout(config['dropout_rate']))
+    model.add(Dense(DENSE_UNITS, activation='relu'))
+    model.add(Dropout(DROPOUT_RATE))
     model.add(Dense(260, activation='sigmoid'))  # Sigmoid activation for multi-label classification
 
-    model.compile(optimizer=tf.keras.optimizers.Adam(learning_rate=config['learning_rate']),
+    model.compile(optimizer=tf.keras.optimizers.Adam(learning_rate=LEARNING_RATE),
                   loss='binary_crossentropy',  # Use binary cross-entropy loss
                   metrics=['accuracy'])
 
     return model
 
-def train_model(config, data, use_parallel_strategy):
+def train_model(data, use_parallel_strategy):
     """Trains the CNN model with the given configuration and data."""
     try:
         train_images = data['train']['images']
@@ -190,17 +200,17 @@ def train_model(config, data, use_parallel_strategy):
         if use_parallel_strategy:
             strategy = tf.distribute.MirroredStrategy()
             with strategy.scope():
-                model = build_model(config)
+                model = build_model()
         else:
-            model = build_model(config)
+            model = build_model()
 
         early_stopping = EarlyStopping(monitor='val_loss', patience=5, restore_best_weights=True)
 
         start_time = time.time()
         history = model.fit(train_images, train_labels,
                             validation_data=(val_images, val_labels),
-                            epochs=config['epochs'],
-                            batch_size=config['batch_size'],
+                            epochs=EPOCHS,
+                            batch_size=BATCH_SIZE,
                             callbacks=[early_stopping])
         training_time = time.time() - start_time
 
@@ -280,30 +290,18 @@ def main():
 
         logging.info("Building the model...")
 
-        # Hyperparameters configuration
-        config = {
-            'batch_size': 16,
-            'epochs': 20,
-            'learning_rate': 0.001,
-            'dropout_rate': 0.4,
-            'num_filters': [32, 64],
-            'kernel_size': 3,
-            'pool_size': 2,
-            'dense_units': 64
-        }
-
         # Train with parallel strategy
         logging.info("Training with parallel strategy...")
-        _, history_parallel, training_time_parallel = train_model(config, processed_data, use_parallel_strategy=True)
+        _, history_parallel, training_time_parallel = train_model(processed_data, use_parallel_strategy=True)
         logging.info("Training time with parallel strategy: %s seconds", training_time_parallel)
 
         # Train without parallel strategy
         logging.info("Training without parallel strategy...")
-        _, history_non_parallel, training_time_non_parallel = train_model(config, processed_data, use_parallel_strategy=False)
+        _, history_non_parallel, training_time_non_parallel = train_model(processed_data, use_parallel_strategy=False)
         logging.info("Training time without parallel strategy: %s seconds", training_time_non_parallel)
 
         logging.info("Evaluating the model...")
-        model, _, _ = train_model(config, processed_data, use_parallel_strategy=False)  # Train the final model
+        model, _, _ = train_model(processed_data, use_parallel_strategy=False)  # Train the final model
         performance = evaluate_model(model, processed_data['test'])
 
         logging.info("Creating figures directory if it does not exist...")

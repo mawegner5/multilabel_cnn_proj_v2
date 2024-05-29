@@ -12,3 +12,16 @@ data/raw/Corel-5k/Corel-5k/images/*
 data/processed/test_images.npy
 data/processed/train_images.npy
 data/processed/val_images.npy
+# Ignore model outputs
+outputs/best_model.h5
+# Ignore processed data
+data/processed/val_images.npy
+data/processed/train_images.npy
+data/processed/test_images.npy
+# Ignore raw data archives
+data/raw/Corel-5k.zip
+# Ignore extracted raw data
+data/raw/Corel-5k/Corel-5k/images.zip
+# Ignore git objects packs
+scripts/.git/objects/pack/pack-63ddb6a08093026d852ae46c3d8ee5e8cd10b137.pack
+.git/objects/pack/pack-9db5aac5f9263dc7c819dda37e69ec33e4e2bf19.pack
