@@ -9,3 +9,6 @@ data/raw/Corel-5k.zip
 
 # Ignore extracted raw data
 data/raw/Corel-5k/Corel-5k/images/*
+data/processed/test_images.npy
+data/processed/train_images.npy
+data/processed/val_images.npy
