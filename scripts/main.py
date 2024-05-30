@@ -12,11 +12,11 @@ import logging
 import time
 import matplotlib.pyplot as plt
 import seaborn as sns
-from sklearn.metrics import jaccard_score, confusion_matrix
+from sklearn.metrics import jaccard_score, confusion_matrix, f1_score
 import subprocess
 import ray
 from ray import tune
-from ray.tune.schedulers import ASHAScheduler, AsyncHyperBandScheduler
+from ray.tune.schedulers import ASHAScheduler
 from tensorflow.keras.optimizers import Adam
 
 # Configuration
@@ -232,6 +232,10 @@ def evaluate_model(model, test_data):
         predictions = model.predict(test_images)
         jaccard_scores = jaccard_score(test_labels, np.round(predictions), average=None)
         overall_jaccard = jaccard_score(test_labels, np.round(predictions), average='micro')
+        
+        # Calculate F1-score
+        f1_scores = f1_score(test_labels, np.round(predictions), average=None)
+        overall_f1 = f1_score(test_labels, np.round(predictions), average='micro')
 
         y_true = test_labels.argmax(axis=1)
         y_pred = predictions.argmax(axis=1)
@@ -240,6 +244,8 @@ def evaluate_model(model, test_data):
         performance = {
             'jaccard_scores': jaccard_scores,
             'overall_jaccard': overall_jaccard,
+            'f1_scores': f1_scores,
+            'overall_f1': overall_f1,
             'confusion_matrix': cm
         }
 
@@ -287,6 +293,26 @@ def monitor_gpu_usage():
         logging.error(f"An error occurred while monitoring GPU usage: {e}")
         raise
 
+class SaveModelInfoCallback(tune.Callback):
+    def __init__(self):
+        self.model_info_list = []
+
+    def on_trial_complete(self, iteration, trials, trial, **info):
+        model_name = trial.trial_id
+        hyperparameters = trial.config
+        performance_metrics = trial.last_result
+        model_info = {
+            'model_name': model_name,
+            'hyperparameters': hyperparameters,
+            'performance_metrics': performance_metrics
+        }
+        self.model_info_list.append(model_info)
+
+    def save_to_file(self, output_file_path):
+        with open(output_file_path, 'w') as f:
+            json.dump(self.model_info_list, f, indent=4)
+        logging.info(f"Model information saved to {output_file_path}")
+
 def train_with_tune(config):
     """Wrapper function to train the model with hyperparameter tuning."""
     data = load_data()
@@ -296,7 +322,8 @@ def train_with_tune(config):
     # Report metrics to Ray Tune
     val_loss = history.history['val_loss'][-1]
     val_accuracy = history.history['val_accuracy'][-1]
-    tune.report(val_loss=val_loss, val_accuracy=val_accuracy)
+    val_f1 = f1_score(processed_data['val']['labels'], np.round(model.predict(processed_data['val']['images'])), average='micro')
+    tune.report(val_loss=val_loss, val_accuracy=val_accuracy, val_f1=val_f1)
 
 def main():
     try:
@@ -324,7 +351,8 @@ def main():
         }
 
         scheduler = ASHAScheduler(metric="val_loss", mode="min")
-        analysis = tune.run(train_with_tune, config=search_space, num_samples=10, scheduler=scheduler, resources_per_trial={"cpu": 2, "gpu": 1})
+        save_model_info_callback = SaveModelInfoCallback()
+        analysis = tune.run(train_with_tune, config=search_space, num_samples=10, scheduler=scheduler, resources_per_trial={"cpu": 2, "gpu": 1}, callbacks=[save_model_info_callback])
 
         best_config = analysis.get_best_config(metric="val_loss", mode="min")
         logging.info(f"Best hyperparameters: {best_config}")
@@ -361,6 +389,9 @@ def main():
 
         logging.info("Training time with parallel strategy: %s seconds", training_time_parallel)
         logging.info("Training time without parallel strategy: %s seconds", training_time_non_parallel)
+
+        # Save the model information to a file
+        save_model_info_callback.save_to_file(os.path.join(OUTPUTS_DIR, 'model_info.json'))
 
     except Exception as e:
         logging.error(f"An error occurred in the preprocessing and training pipeline: {e}")
