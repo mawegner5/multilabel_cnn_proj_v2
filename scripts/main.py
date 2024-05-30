@@ -255,6 +255,23 @@ def evaluate_model(model, test_data):
         logging.error(f"An error occurred during evaluation: {e}")
         raise
 
+def save_image_labels(test_data, predictions, output_file_path):
+    """Saves the image IDs and predicted labels to a JSON file."""
+    try:
+        image_labels = []
+        for idx, prediction in enumerate(predictions):
+            image_id = test_data['images'][idx]
+            predicted_labels = [label for label, pred in zip(test_data['classes'], prediction) if pred > 0.5]
+            image_labels.append({'image_id': image_id, 'predicted_labels': predicted_labels})
+
+        with open(output_file_path, 'w') as f:
+            json.dump(image_labels, f, indent=4)
+        logging.info(f"Image labels saved to {output_file_path}")
+
+    except Exception as e:
+        logging.error(f"An error occurred while saving image labels: {e}")
+        raise
+
 def plot_confusion_matrix(cm, filename):
     normalized_cm = cm.astype('float') / cm.sum(axis=1)[:, np.newaxis]
     plt.figure(figsize=(10, 8))
@@ -300,7 +317,11 @@ class SaveModelInfoCallback(tune.Callback):
     def on_trial_complete(self, iteration, trials, trial, **info):
         model_name = trial.trial_id
         hyperparameters = trial.config
-        performance_metrics = trial.last_result
+        performance_metrics = {
+            'val_loss': trial.last_result['val_loss'],
+            'val_accuracy': trial.last_result['val_accuracy'],
+            'val_f1': trial.last_result['val_f1']
+        }
         model_info = {
             'model_name': model_name,
             'hyperparameters': hyperparameters,
@@ -324,6 +345,7 @@ def train_with_tune(config):
     val_accuracy = history.history['val_accuracy'][-1]
     val_f1 = f1_score(processed_data['val']['labels'], np.round(model.predict(processed_data['val']['images'])), average='micro')
     tune.report(val_loss=val_loss, val_accuracy=val_accuracy, val_f1=val_f1)
+
 
 def main():
     try:
@@ -391,7 +413,10 @@ def main():
         logging.info("Training time without parallel strategy: %s seconds", training_time_non_parallel)
 
         # Save the model information to a file
-        save_model_info_callback.save_to_file(os.path.join(OUTPUTS_DIR, 'model_info.json'))
+        save_model_info_callback.save_to_file(os.path.join(OUTPUTS_DIR, 'hyperparameters_performance.json'))
+
+        # Save the image labels to a file
+        save_image_labels(processed_data['test'], model.predict(processed_data['test']['images']), os.path.join(OUTPUTS_DIR, 'image_labels.json'))
 
     except Exception as e:
         logging.error(f"An error occurred in the preprocessing and training pipeline: {e}")
