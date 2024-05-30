@@ -1,18 +1,20 @@
 # Ignore model outputs
 outputs/best_model.h5
+outputs/*.h5
 
 # Ignore processed data
 data/processed/
 scripts/data/processed/
 
 # Ignore raw data archives
-data/raw/
-scripts/data/raw/
+data/raw/*.zip
+data/raw/Corel-5k/
+scripts/data/raw/*.zip
+scripts/data/raw/Corel-5k/
 
 # Ignore git objects packs
-scripts/.git/objects/pack/
 .git/objects/pack/
+scripts/.git/objects/pack/
 
 # Ignore other unnecessary files
-data/raw/Corel-5k.zip
-data/raw/Corel-5k/
+data/Corel-5k.zip
