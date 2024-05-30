@@ -4,52 +4,45 @@ import numpy as np
 import tensorflow as tf
 from PIL import Image
 from sklearn.model_selection import train_test_split
-from tensorflow.keras.preprocessing.image import img_to_array
+from tensorflow.keras.preprocessing.image import ImageDataGenerator, img_to_array
 from tensorflow.keras.models import Sequential
 from tensorflow.keras.layers import Conv2D, MaxPooling2D, Flatten, Dense, Dropout, InputLayer
 from tensorflow.keras.callbacks import EarlyStopping
 import logging
-import zipfile
 import time
 import matplotlib.pyplot as plt
 import seaborn as sns
 from sklearn.metrics import jaccard_score, confusion_matrix
+import subprocess
+import ray
+from ray import tune
+from ray.tune.schedulers import ASHAScheduler, AsyncHyperBandScheduler
+from tensorflow.keras.optimizers import Adam
 
 # Configuration
-DATA_DIR = 'data/raw/Corel-5k/Corel-5k/'
-PROCESSED_DIR = 'data/processed/'
-OUTPUTS_DIR = 'outputs/'
-FIGURES_DIR = 'figures/'
-
-# Hyperparameters configuration
-BATCH_SIZE = 16
-EPOCHS = 20
-LEARNING_RATE = 0.001
-DROPOUT_RATE = 0.4
-NUM_FILTERS = [32, 64]
-KERNEL_SIZE = 3
-POOL_SIZE = 2
-DENSE_UNITS = 64
+DATA_DIR = '/root/.ipython/multilabel_cnn_proj_v2/data/raw/Corel-5k/Corel-5k/'
+PROCESSED_DIR = '/root/.ipython/multilabel_cnn_proj_v2/data/processed/'
+OUTPUTS_DIR = '/root/.ipython/multilabel_cnn_proj_v2/outputs/'
+FIGURES_DIR = '/root/.ipython/multilabel_cnn_proj_v2/figures/'
 
 # Set up logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-def extract_zip(file_path, extract_to):
-    """Extracts a zip file to the specified directory."""
-    try:
-        with zipfile.ZipFile(file_path, 'r') as zip_ref:
-            zip_ref.extractall(extract_to)
-        logging.info(f"Extracted {file_path} to {extract_to}.")
-    except Exception as e:
-        logging.error(f"An error occurred while extracting {file_path}: {e}")
-        raise
-
 def load_data():
     """Loads the dataset and returns train, validation, and test data."""
     try:
+        # Define absolute paths to the JSON files and images directory
         train_json_path = os.path.join(DATA_DIR, 'train.json')
         test_json_path = os.path.join(DATA_DIR, 'test.json')
         images_dir = os.path.join(DATA_DIR, 'images')
+
+        # Check if the files exist
+        if not os.path.exists(train_json_path):
+            raise FileNotFoundError(f"Train JSON file not found: {train_json_path}")
+        if not os.path.exists(test_json_path):
+            raise FileNotFoundError(f"Test JSON file not found: {test_json_path}")
+        if not os.path.exists(images_dir):
+            raise FileNotFoundError(f"Images directory not found: {images_dir}")
 
         with open(train_json_path, 'r') as f:
             train_annotations = json.load(f)
@@ -168,28 +161,34 @@ def save_preprocessed_data(data, processed_dir):
         logging.error(f"An error occurred while saving preprocessed data: {e}")
         raise
 
-def build_model():
+def build_model(config):
     """Builds and compiles the CNN model."""
     model = Sequential()
     model.add(InputLayer(input_shape=(224, 224, 3)))
 
-    for num_filter in NUM_FILTERS:
-        model.add(Conv2D(num_filter, (KERNEL_SIZE, KERNEL_SIZE), activation='relu'))
-        model.add(MaxPooling2D(pool_size=(POOL_SIZE, POOL_SIZE)))
-        model.add(Dropout(DROPOUT_RATE))
+    for num_filter in config["NUM_FILTERS"]:
+        model.add(Conv2D(num_filter, (config["KERNEL_SIZE"], config["KERNEL_SIZE"]), activation='relu'))
+        model.add(MaxPooling2D(pool_size=(config["POOL_SIZE"], config["POOL_SIZE"])))
+        model.add(Dropout(config["DROPOUT_RATE"]))
 
     model.add(Flatten())
-    model.add(Dense(DENSE_UNITS, activation='relu'))
-    model.add(Dropout(DROPOUT_RATE))
+    model.add(Dense(config["DENSE_UNITS"], activation='relu'))
+    model.add(Dropout(config["DROPOUT_RATE"]))
     model.add(Dense(260, activation='sigmoid'))  # Sigmoid activation for multi-label classification
 
-    model.compile(optimizer=tf.keras.optimizers.Adam(learning_rate=LEARNING_RATE),
+    model.compile(optimizer=tf.keras.optimizers.Adam(learning_rate=config["LEARNING_RATE"]),
                   loss='binary_crossentropy',  # Use binary cross-entropy loss
                   metrics=['accuracy'])
 
     return model
 
-def train_model(data, use_parallel_strategy):
+def data_generator(images, labels, batch_size):
+    """Generates batches of data for training."""
+    datagen = ImageDataGenerator()
+    generator = datagen.flow(images, labels, batch_size=batch_size)
+    return generator
+
+def train_model(config, data, use_parallel_strategy):
     """Trains the CNN model with the given configuration and data."""
     try:
         train_images = data['train']['images']
@@ -197,20 +196,24 @@ def train_model(data, use_parallel_strategy):
         val_images = data['val']['images']
         val_labels = data['val']['labels']
 
+        train_gen = data_generator(train_images, train_labels, config["BATCH_SIZE"])
+        val_gen = data_generator(val_images, val_labels, config["BATCH_SIZE"])
+
         if use_parallel_strategy:
             strategy = tf.distribute.MirroredStrategy()
             with strategy.scope():
-                model = build_model()
+                model = build_model(config)
         else:
-            model = build_model()
+            model = build_model(config)
 
         early_stopping = EarlyStopping(monitor='val_loss', patience=5, restore_best_weights=True)
 
         start_time = time.time()
-        history = model.fit(train_images, train_labels,
-                            validation_data=(val_images, val_labels),
-                            epochs=EPOCHS,
-                            batch_size=BATCH_SIZE,
+        history = model.fit(train_gen,
+                            validation_data=val_gen,
+                            epochs=config["EPOCHS"],
+                            steps_per_epoch=len(train_images) // config["BATCH_SIZE"],
+                            validation_steps=len(val_images) // config["BATCH_SIZE"],
                             callbacks=[early_stopping])
         training_time = time.time() - start_time
 
@@ -275,10 +278,28 @@ def plot_loss_vs_epochs(history, filename):
     plt.savefig(filename)
     plt.close()
 
+def monitor_gpu_usage():
+    """Monitors GPU usage using nvidia-smi."""
+    try:
+        result = subprocess.run(['nvidia-smi'], stdout=subprocess.PIPE)
+        logging.info(result.stdout.decode('utf-8'))
+    except Exception as e:
+        logging.error(f"An error occurred while monitoring GPU usage: {e}")
+        raise
+
+def train_with_tune(config):
+    """Wrapper function to train the model with hyperparameter tuning."""
+    data = load_data()
+    processed_data = preprocess_data(data['train'], data['val'], data['test'])
+    model, history, _ = train_model(config, processed_data, use_parallel_strategy=False)
+    
+    # Report metrics to Ray Tune
+    val_loss = history.history['val_loss'][-1]
+    val_accuracy = history.history['val_accuracy'][-1]
+    tune.report(val_loss=val_loss, val_accuracy=val_accuracy)
+
 def main():
     try:
-        extract_zip('/root/.ipython/multilabel_cnn_proj/data/raw/Corel-5k.zip', 'data/raw/Corel-5k/')
-        
         logging.info("Loading data...")
         data = load_data()
 
@@ -290,18 +311,38 @@ def main():
 
         logging.info("Building the model...")
 
-        # Train with parallel strategy
+        # Hyperparameter tuning with Ray Tune
+        search_space = {
+            "BATCH_SIZE": tune.choice([16, 32, 64]),
+            "EPOCHS": tune.choice([10, 20, 30]),
+            "LEARNING_RATE": tune.loguniform(1e-4, 1e-2),
+            "DROPOUT_RATE": tune.uniform(0.2, 0.5),
+            "NUM_FILTERS": tune.choice([[32, 64], [64, 128]]),
+            "KERNEL_SIZE": tune.choice([3, 5]),
+            "POOL_SIZE": tune.choice([2, 3]),
+            "DENSE_UNITS": tune.choice([64, 128])
+        }
+
+        scheduler = ASHAScheduler(metric="val_loss", mode="min")
+        analysis = tune.run(train_with_tune, config=search_space, num_samples=10, scheduler=scheduler, resources_per_trial={"cpu": 2, "gpu": 1})
+
+        best_config = analysis.get_best_config(metric="val_loss", mode="min")
+        logging.info(f"Best hyperparameters: {best_config}")
+
+        # Train with the best hyperparameters
         logging.info("Training with parallel strategy...")
-        _, history_parallel, training_time_parallel = train_model(processed_data, use_parallel_strategy=True)
+        monitor_gpu_usage()
+        model, history_parallel, training_time_parallel = train_model(best_config, processed_data, use_parallel_strategy=True)
+        monitor_gpu_usage()
         logging.info("Training time with parallel strategy: %s seconds", training_time_parallel)
 
-        # Train without parallel strategy
         logging.info("Training without parallel strategy...")
-        _, history_non_parallel, training_time_non_parallel = train_model(processed_data, use_parallel_strategy=False)
+        monitor_gpu_usage()
+        model, history_non_parallel, training_time_non_parallel = train_model(best_config, processed_data, use_parallel_strategy=False)
+        monitor_gpu_usage()
         logging.info("Training time without parallel strategy: %s seconds", training_time_non_parallel)
 
         logging.info("Evaluating the model...")
-        model, _, _ = train_model(processed_data, use_parallel_strategy=False)  # Train the final model
         performance = evaluate_model(model, processed_data['test'])
 
         logging.info("Creating figures directory if it does not exist...")
