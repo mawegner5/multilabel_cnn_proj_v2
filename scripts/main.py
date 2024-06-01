@@ -7,7 +7,7 @@ from sklearn.model_selection import train_test_split
 from tensorflow.keras.preprocessing.image import ImageDataGenerator, img_to_array
 from tensorflow.keras.models import Sequential
 from tensorflow.keras.layers import Conv2D, MaxPooling2D, Flatten, Dense, Dropout, InputLayer
-from tensorflow.keras.callbacks import EarlyStopping
+from tensorflow.keras.callbacks import EarlyStopping, ModelCheckpoint
 import logging
 import time
 import matplotlib.pyplot as plt
@@ -207,6 +207,7 @@ def train_model(config, data, use_parallel_strategy):
             model = build_model(config)
 
         early_stopping = EarlyStopping(monitor='val_loss', patience=5, restore_best_weights=True)
+        checkpoint = ModelCheckpoint(filepath='best_model.h5', monitor='val_loss', save_best_only=True)
 
         start_time = time.time()
         history = model.fit(train_gen,
@@ -214,14 +215,20 @@ def train_model(config, data, use_parallel_strategy):
                             epochs=config["EPOCHS"],
                             steps_per_epoch=len(train_images) // config["BATCH_SIZE"],
                             validation_steps=len(val_images) // config["BATCH_SIZE"],
-                            callbacks=[early_stopping])
+                            callbacks=[early_stopping, checkpoint])
         training_time = time.time() - start_time
+
+        # Print computational requirements
+        computational_requirements = tf.config.experimental.get_memory_info('GPU:0')
+        logging.info(f"Computational requirements: {computational_requirements}")
+        logging.info(f"Training time with {'parallel' if use_parallel_strategy else 'non-parallel'} strategy: {training_time:.2f} seconds")
 
         return model, history, training_time
     
     except Exception as e:
         logging.error(f"An error occurred during training: {e}")
         raise
+
 
 def evaluate_model(model, test_data):
     """Evaluates the trained model on the test data."""
@@ -336,15 +343,20 @@ class SaveModelInfoCallback(tune.Callback):
 
 def train_with_tune(config):
     """Wrapper function to train the model with hyperparameter tuning."""
-    data = load_data()
-    processed_data = preprocess_data(data['train'], data['val'], data['test'])
-    model, history, _ = train_model(config, processed_data, use_parallel_strategy=False)
-    
-    # Report metrics to Ray Tune
-    val_loss = history.history['val_loss'][-1]
-    val_accuracy = history.history['val_accuracy'][-1]
-    val_f1 = f1_score(processed_data['val']['labels'], np.round(model.predict(processed_data['val']['images'])), average='micro')
-    tune.report(val_loss=val_loss, val_accuracy=val_accuracy, val_f1=val_f1)
+    try:
+        data = load_data()
+        processed_data = preprocess_data(data['train'], data['val'], data['test'])
+        model, history, _ = train_model(config, processed_data, use_parallel_strategy=False)
+        
+        # Report metrics to Ray Tune
+        val_loss = history.history['val_loss'][-1]
+        val_accuracy = history.history['val_accuracy'][-1]
+        val_f1 = f1_score(processed_data['val']['labels'], np.round(model.predict(processed_data['val']['images'])), average='micro')
+        tune.report(val_loss=val_loss, val_accuracy=val_accuracy, val_f1=val_f1)
+
+    except Exception as e:
+        logging.error(f"An error occurred during train_with_tune: {e}")
+        raise
 
 
 def main():
