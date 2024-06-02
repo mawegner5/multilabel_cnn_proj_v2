@@ -15,10 +15,11 @@ import seaborn as sns
 from sklearn.metrics import jaccard_score, confusion_matrix, f1_score
 import subprocess
 import ray
-from ray import tune
+from ray import tune, train
 from ray.tune.schedulers import ASHAScheduler
 from ray.tune.integration.keras import TuneReportCallback
 from tensorflow.keras.optimizers import Adam
+from ray.air import session
 
 # Configuration
 DATA_DIR = '/root/.ipython/multilabel_cnn_proj_v2/data/raw/Corel-5k/Corel-5k/'
@@ -227,7 +228,7 @@ def train_model(config, data, use_parallel_strategy):
 
 
 def evaluate_model(model, test_data):
-    """Evaluates the trained model on the test data."""
+    """Evaluates the trained model on the test data, with modified confusion matrix and Jaccard score output."""
     try:
         test_images = test_data['images']
         test_labels = test_data['labels']
@@ -240,9 +241,14 @@ def evaluate_model(model, test_data):
         f1_scores = f1_score(test_labels, np.round(predictions), average=None)
         overall_f1 = f1_score(test_labels, np.round(predictions), average='micro')
 
-        y_true = test_labels.argmax(axis=1)
-        y_pred = predictions.argmax(axis=1)
-        cm = confusion_matrix(y_true, y_pred)
+        # For binary classification, assuming the test_labels are binary
+        if test_labels.shape[1] == 2:  # Adjust based on your actual setup
+            y_true = test_labels[:, 1]  # Assuming the second column is the positive class
+            y_pred = predictions[:, 1] > 0.5
+        else:
+            y_true = test_labels.argmax(axis=1)
+            y_pred = predictions.argmax(axis=1)
+        cm = confusion_matrix(y_true, y_pred, labels=[0, 1])  # Binary classification
 
         performance = {
             'jaccard_scores': jaccard_scores,
@@ -253,11 +259,21 @@ def evaluate_model(model, test_data):
         }
 
         return performance
-    
+
     except Exception as e:
         logging.error(f"An error occurred during evaluation: {e}")
         raise
 
+def save_jaccard_score(overall_jaccard, output_file_path):
+    """Saves the overall Jaccard score in text format."""
+    try:
+        with open(output_file_path, 'w') as file:
+            file.write(f"Overall Jaccard Score: {overall_jaccard:.4f}\n")
+        logging.info(f"Jaccard score saved to {output_file_path}")
+
+    except Exception as e:
+        logging.error(f"An error occurred while saving Jaccard score: {e}")
+        raise
 def save_image_labels(test_data, predictions, output_file_path):
     """Saves the image IDs and predicted labels to a JSON file."""
     try:
@@ -276,12 +292,12 @@ def save_image_labels(test_data, predictions, output_file_path):
         raise
 
 def plot_confusion_matrix(cm, filename):
-    normalized_cm = cm.astype('float') / cm.sum(axis=1)[:, np.newaxis]
+    """Plots the 2x2 confusion matrix."""
     plt.figure(figsize=(10, 8))
-    sns.heatmap(normalized_cm, annot=True, fmt=".2f", cmap="Blues", xticklabels=['Non-Relevant', 'Relevant'], yticklabels=['Non-Relevant', 'Relevant'])
+    sns.heatmap(cm, annot=True, fmt="d", cmap="Blues", xticklabels=['Class 0', 'Class 1'], yticklabels=['Class 0', 'Class 1'])
     plt.xlabel('Predicted')
     plt.ylabel('True')
-    plt.title('Normalized Confusion Matrix')
+    plt.title('Confusion Matrix')
     plt.savefig(filename)
     plt.close()
 
@@ -340,15 +356,15 @@ class SaveModelInfoCallback(tune.Callback):
 # Custom Keras callback to report metrics through Ray Train
 class RayTuneReportCallback(Callback):
     def on_epoch_end(self, epoch, logs=None):
-        tune.report(loss=logs['val_loss'], accuracy=logs['val_accuracy'])
+        session.report({"loss": logs["val_loss"], "accuracy": logs["val_accuracy"]})
 
 def train_with_tune(config, checkpoint_dir=None):
-    # data loading and preprocessing
-    data = load_data()  # Corrected function name here
+    # Data loading and preprocessing
+    data = load_data()  # Corrected to the right function name
     processed_data = preprocess_data(data['train'], data['val'], data['test'])
 
     # Build model
-    model = build_model(config)  # Corrected function name here
+    model = build_model(config)
 
     # Define data generators
     train_gen = data_generator(processed_data['train']['images'], processed_data['train']['labels'], config["BATCH_SIZE"])
@@ -365,7 +381,6 @@ def train_with_tune(config, checkpoint_dir=None):
               validation_steps=len(processed_data['val']['images']) // config["BATCH_SIZE"],
               callbacks=callbacks,
               verbose=1)
-
 
 def main():
     try:
