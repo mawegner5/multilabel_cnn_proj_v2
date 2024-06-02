@@ -7,7 +7,7 @@ from sklearn.model_selection import train_test_split
 from tensorflow.keras.preprocessing.image import ImageDataGenerator, img_to_array
 from tensorflow.keras.models import Sequential
 from tensorflow.keras.layers import Conv2D, MaxPooling2D, Flatten, Dense, Dropout, InputLayer
-from tensorflow.keras.callbacks import EarlyStopping, ModelCheckpoint
+from tensorflow.keras.callbacks import EarlyStopping, Callback
 import logging
 import time
 import matplotlib.pyplot as plt
@@ -17,6 +17,7 @@ import subprocess
 import ray
 from ray import tune
 from ray.tune.schedulers import ASHAScheduler
+from ray.tune.integration.keras import TuneReportCallback
 from tensorflow.keras.optimizers import Adam
 
 # Configuration
@@ -206,25 +207,20 @@ def train_model(config, data, use_parallel_strategy):
         else:
             model = build_model(config)
 
-        early_stopping = EarlyStopping(monitor='val_loss', patience=5, restore_best_weights=True)
-        checkpoint = ModelCheckpoint(filepath='best_model.h5', monitor='val_loss', save_best_only=True)
+        # Define callbacks here
+        callbacks = [EarlyStopping(monitor='val_loss', patience=5, restore_best_weights=True)]
 
         start_time = time.time()
         history = model.fit(train_gen,
                             validation_data=val_gen,
-                            epochs=config["EPOCHS"],
+                            epochs=config["EPOCHs"],
                             steps_per_epoch=len(train_images) // config["BATCH_SIZE"],
                             validation_steps=len(val_images) // config["BATCH_SIZE"],
-                            callbacks=[early_stopping, checkpoint])
+                            callbacks=callbacks)
         training_time = time.time() - start_time
 
-        # Print computational requirements
-        computational_requirements = tf.config.experimental.get_memory_info('GPU:0')
-        logging.info(f"Computational requirements: {computational_requirements}")
-        logging.info(f"Training time with {'parallel' if use_parallel_strategy else 'non-parallel'} strategy: {training_time:.2f} seconds")
-
         return model, history, training_time
-    
+
     except Exception as e:
         logging.error(f"An error occurred during training: {e}")
         raise
@@ -341,22 +337,34 @@ class SaveModelInfoCallback(tune.Callback):
             json.dump(self.model_info_list, f, indent=4)
         logging.info(f"Model information saved to {output_file_path}")
 
-def train_with_tune(config):
-    """Wrapper function to train the model with hyperparameter tuning."""
-    try:
-        data = load_data()
-        processed_data = preprocess_data(data['train'], data['val'], data['test'])
-        model, history, _ = train_model(config, processed_data, use_parallel_strategy=False)
-        
-        # Report metrics to Ray Tune
-        val_loss = history.history['val_loss'][-1]
-        val_accuracy = history.history['val_accuracy'][-1]
-        val_f1 = f1_score(processed_data['val']['labels'], np.round(model.predict(processed_data['val']['images'])), average='micro')
-        tune.report(val_loss=val_loss, val_accuracy=val_accuracy, val_f1=val_f1)
+# Custom Keras callback to report metrics through Ray Train
+class RayTuneReportCallback(Callback):
+    def on_epoch_end(self, epoch, logs=None):
+        tune.report(loss=logs['val_loss'], accuracy=logs['val_accuracy'])
 
-    except Exception as e:
-        logging.error(f"An error occurred during train_with_tune: {e}")
-        raise
+def train_with_tune(config, checkpoint_dir=None):
+    # data loading and preprocessing
+    data = load_data()  # Corrected function name here
+    processed_data = preprocess_data(data['train'], data['val'], data['test'])
+
+    # Build model
+    model = build_model(config)  # Corrected function name here
+
+    # Define data generators
+    train_gen = data_generator(processed_data['train']['images'], processed_data['train']['labels'], config["BATCH_SIZE"])
+    val_gen = data_generator(processed_data['val']['images'], processed_data['val']['labels'], config["BATCH_SIZE"])
+
+    # Set callbacks
+    callbacks = [RayTuneReportCallback(), EarlyStopping(monitor='val_loss', patience=5, restore_best_weights=True)]
+
+    # Train the model
+    model.fit(train_gen,
+              validation_data=val_gen,
+              epochs=config["EPOCHS"],
+              steps_per_epoch=len(processed_data['train']['images']) // config["BATCH_SIZE"],
+              validation_steps=len(processed_data['val']['images']) // config["BATCH_SIZE"],
+              callbacks=callbacks,
+              verbose=1)
 
 
 def main():
@@ -368,11 +376,11 @@ def main():
         processed_data = preprocess_data(data['train'], data['val'], data['test'])
 
         logging.info("Saving preprocessed data...")
-        save_preprocessed_data(processed_data, PROCESSED_DIR)
+        save_preprocessed_data(processed_data, PROCESSED_DIR)  # Corrected function name here
 
-        logging.info("Building the model...")
+        logging.info("Building and training the model with Ray Tune...")
 
-        # Hyperparameter tuning with Ray Tune
+        # Define the search space for hyperparameters
         search_space = {
             "BATCH_SIZE": tune.choice([16, 32, 64]),
             "EPOCHS": tune.choice([10, 20, 30]),
@@ -384,54 +392,73 @@ def main():
             "DENSE_UNITS": tune.choice([64, 128])
         }
 
-        scheduler = ASHAScheduler(metric="val_loss", mode="min")
-        save_model_info_callback = SaveModelInfoCallback()
-        analysis = tune.run(train_with_tune, config=search_space, num_samples=10, scheduler=scheduler, resources_per_trial={"cpu": 2, "gpu": 1}, callbacks=[save_model_info_callback])
+        # Configure the scheduler and execution
+        scheduler = ASHAScheduler(
+            metric="loss",
+            mode="min",
+            max_t=30,
+            grace_period=5,
+            reduction_factor=2
+        )
 
-        best_config = analysis.get_best_config(metric="val_loss", mode="min")
-        logging.info(f"Best hyperparameters: {best_config}")
+        # Initialize Ray
+        if not ray.is_initialized():
+            ray.init()
 
-        # Train with the best hyperparameters
-        logging.info("Training with parallel strategy...")
-        monitor_gpu_usage()
-        model, history_parallel, training_time_parallel = train_model(best_config, processed_data, use_parallel_strategy=True)
-        monitor_gpu_usage()
-        logging.info("Training time with parallel strategy: %s seconds", training_time_parallel)
+        # Start Ray Tune run with the updated training function
+        result = tune.run(
+            train_with_tune,
+            name="Multi-Label-Classification",
+            resources_per_trial={"cpu": 2, "gpu": 1},
+            config=search_space,
+            num_samples=10,
+            scheduler=scheduler,
+            progress_reporter=tune.CLIReporter(metric_columns=["loss", "accuracy", "training_iteration"])
+        )
 
-        logging.info("Training without parallel strategy...")
-        monitor_gpu_usage()
-        model, history_non_parallel, training_time_non_parallel = train_model(best_config, processed_data, use_parallel_strategy=False)
-        monitor_gpu_usage()
-        logging.info("Training time without parallel strategy: %s seconds", training_time_non_parallel)
+        # Fetch the best trial
+        best_trial = result.get_best_trial("loss", "min", "last")
+        logging.info(f"Best trial config: {best_trial.config}")
+        logging.info(f"Best trial final validation loss: {best_trial.last_result['loss']}")
+        logging.info(f"Best trial final validation accuracy: {best_trial.last_result['accuracy']}")
 
-        logging.info("Evaluating the model...")
-        performance = evaluate_model(model, processed_data['test'])
+        # Rebuild and retrain the model using the best trial parameters
+        best_trained_model = build_model(best_trial.config)
+        best_train_gen = data_generator(processed_data['train']['images'], processed_data['train']['labels'], best_trial.config["BATCH_SIZE"])
+        best_val_gen = data_generator(processed_data['val']['images'], processed_data['val']['labels'], best_trial.config["BATCH_SIZE"])
 
-        logging.info("Creating figures directory if it does not exist...")
-        os.makedirs(FIGURES_DIR, exist_ok=True)
+        # Retrain the best model
+        best_trained_model.fit(
+            best_train_gen,
+            validation_data=best_val_gen,
+            epochs=best_trial.config["EPOCHS"],
+            steps_per_epoch=len(processed_data['train']['images']) // best_trial.config["BATCH_SIZE"],
+            validation_steps=len(processed_data['val']['images']) // best_trial.config["BATCH_SIZE"]
+        )
 
-        logging.info("Plotting confusion matrix...")
-        plot_confusion_matrix(performance['confusion_matrix'], filename=os.path.join(FIGURES_DIR, 'confusion_matrix.png'))
+        # Evaluate the best model
+        logging.info("Evaluating the best model...")
+        test_performance = evaluate_model(best_trained_model, processed_data['test'])
+        logging.info(f"Test Jaccard Score: {test_performance['overall_jaccard']:.4f}")
+        logging.info(f"Test F1 Score: {test_performance['overall_f1']:.4f}")
 
-        logging.info("Plotting overall Jaccard score...")
-        plot_overall_jaccard_score(performance['overall_jaccard'], filename=os.path.join(FIGURES_DIR, 'overall_jaccard_score.png'))
+        # Saving the performance metrics and model
+        performance_file_path = os.path.join(OUTPUTS_DIR, "best_model_performance.json")
+        with open(performance_file_path, 'w') as f:
+            json.dump(test_performance, f, indent=4)
+        logging.info("Model performance metrics saved.")
 
-        logging.info("Plotting loss vs. epochs...")
-        plot_loss_vs_epochs(history_non_parallel, filename=os.path.join(FIGURES_DIR, 'loss_vs_epochs.png'))
+        # Plotting results
+        plot_confusion_matrix(test_performance['confusion_matrix'], os.path.join(FIGURES_DIR, 'confusion_matrix.png'))
+        plot_overall_jaccard_score(test_performance['overall_jaccard'], os.path.join(FIGURES_DIR, 'overall_jaccard_score.png'))
+        plot_loss_vs_epochs(best_trained_model.history, os.path.join(FIGURES_DIR, 'loss_vs_epochs.png'))
 
-        logging.info(f"Overall Jaccard score: {performance['overall_jaccard']:.4f}")
-
-        logging.info("Training time with parallel strategy: %s seconds", training_time_parallel)
-        logging.info("Training time without parallel strategy: %s seconds", training_time_non_parallel)
-
-        # Save the model information to a file
-        save_model_info_callback.save_to_file(os.path.join(OUTPUTS_DIR, 'hyperparameters_performance.json'))
-
-        # Save the image labels to a file
-        save_image_labels(processed_data['test'], model.predict(processed_data['test']['images']), os.path.join(OUTPUTS_DIR, 'image_labels.json'))
+        # Shutdown Ray
+        ray.shutdown()
 
     except Exception as e:
         logging.error(f"An error occurred in the preprocessing and training pipeline: {e}")
+        ray.shutdown()  # Ensure Ray shuts down regardless of the error
 
 if __name__ == "__main__":
     main()
