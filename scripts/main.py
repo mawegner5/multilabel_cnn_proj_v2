@@ -15,7 +15,7 @@ import seaborn as sns
 from sklearn.metrics import jaccard_score, confusion_matrix, f1_score
 import subprocess
 import ray
-from ray import tune, train
+from ray import tune
 from ray.tune.schedulers import ASHAScheduler
 from ray.tune.integration.keras import TuneReportCallback
 from tensorflow.keras.optimizers import Adam
@@ -125,7 +125,7 @@ def preprocess_data(train_data, val_data, test_data):
             'train': train_data,
             'val': val_data,
             'test': test_data,
-            'classes': unique_labels
+            'classes': unique_labels  # Ensure 'classes' key is included
         }
 
         return data
@@ -133,6 +133,7 @@ def preprocess_data(train_data, val_data, test_data):
     except Exception as e:
         logging.error(f"An error occurred while preprocessing data: {e}")
         raise
+
 
 def save_preprocessed_data(data, processed_dir):
     """Saves the preprocessed data to disk."""
@@ -214,7 +215,7 @@ def train_model(config, data, use_parallel_strategy):
         start_time = time.time()
         history = model.fit(train_gen,
                             validation_data=val_gen,
-                            epochs=config["EPOCHs"],
+                            epochs=config["EPOCHS"],
                             steps_per_epoch=len(train_images) // config["BATCH_SIZE"],
                             validation_steps=len(val_images) // config["BATCH_SIZE"],
                             callbacks=callbacks)
@@ -226,9 +227,8 @@ def train_model(config, data, use_parallel_strategy):
         logging.error(f"An error occurred during training: {e}")
         raise
 
-
 def evaluate_model(model, test_data):
-    """Evaluates the trained model on the test data, with modified confusion matrix and Jaccard score output."""
+    """Evaluates the trained model on the test data and saves predicted labels."""
     try:
         test_images = test_data['images']
         test_labels = test_data['labels']
@@ -241,14 +241,9 @@ def evaluate_model(model, test_data):
         f1_scores = f1_score(test_labels, np.round(predictions), average=None)
         overall_f1 = f1_score(test_labels, np.round(predictions), average='micro')
 
-        # For binary classification, assuming the test_labels are binary
-        if test_labels.shape[1] == 2:  # Adjust based on your actual setup
-            y_true = test_labels[:, 1]  # Assuming the second column is the positive class
-            y_pred = predictions[:, 1] > 0.5
-        else:
-            y_true = test_labels.argmax(axis=1)
-            y_pred = predictions.argmax(axis=1)
-        cm = confusion_matrix(y_true, y_pred, labels=[0, 1])  # Binary classification
+        y_true = test_labels.argmax(axis=1)
+        y_pred = predictions.argmax(axis=1)
+        cm = confusion_matrix(y_true, y_pred)
 
         performance = {
             'jaccard_scores': jaccard_scores,
@@ -258,30 +253,30 @@ def evaluate_model(model, test_data):
             'confusion_matrix': cm
         }
 
-        return performance
+        # Save image labels to JSON
+        save_image_labels(test_data, predictions, os.path.join(OUTPUTS_DIR, 'image_labels.json'))
 
+        return performance
+    
     except Exception as e:
         logging.error(f"An error occurred during evaluation: {e}")
         raise
 
-def save_jaccard_score(overall_jaccard, output_file_path):
-    """Saves the overall Jaccard score in text format."""
-    try:
-        with open(output_file_path, 'w') as file:
-            file.write(f"Overall Jaccard Score: {overall_jaccard:.4f}\n")
-        logging.info(f"Jaccard score saved to {output_file_path}")
-
-    except Exception as e:
-        logging.error(f"An error occurred while saving Jaccard score: {e}")
-        raise
 def save_image_labels(test_data, predictions, output_file_path):
-    """Saves the image IDs and predicted labels to a JSON file."""
+    """Saves the image IDs, predicted labels, actual labels, and label IDs to a JSON file."""
     try:
         image_labels = []
         for idx, prediction in enumerate(predictions):
-            image_id = test_data['images'][idx]
+            image_id = idx  # Using the index as the image ID
             predicted_labels = [label for label, pred in zip(test_data['classes'], prediction) if pred > 0.5]
-            image_labels.append({'image_id': image_id, 'predicted_labels': predicted_labels})
+            actual_labels = [label for label, true in zip(test_data['classes'], test_data['labels'][idx]) if true == 1]
+            label_ids = [test_data['classes'].index(label) for label in actual_labels]
+            image_labels.append({
+                'image_id': image_id,
+                'predicted_labels': predicted_labels,
+                'actual_labels': actual_labels,
+                'label_ids': label_ids
+            })
 
         with open(output_file_path, 'w') as f:
             json.dump(image_labels, f, indent=4)
@@ -292,12 +287,12 @@ def save_image_labels(test_data, predictions, output_file_path):
         raise
 
 def plot_confusion_matrix(cm, filename):
-    """Plots the 2x2 confusion matrix."""
+    normalized_cm = cm.astype('float') / cm.sum(axis=1)[:, np.newaxis]
     plt.figure(figsize=(10, 8))
-    sns.heatmap(cm, annot=True, fmt="d", cmap="Blues", xticklabels=['Class 0', 'Class 1'], yticklabels=['Class 0', 'Class 1'])
+    sns.heatmap(normalized_cm, annot=True, fmt=".2f", cmap="Blues", xticklabels=['Non-Relevant', 'Relevant'], yticklabels=['Non-Relevant', 'Relevant'])
     plt.xlabel('Predicted')
     plt.ylabel('True')
-    plt.title('Confusion Matrix')
+    plt.title('Normalized Confusion Matrix')
     plt.savefig(filename)
     plt.close()
 
@@ -309,13 +304,13 @@ def plot_overall_jaccard_score(overall_jaccard, filename):
     plt.savefig(filename)
     plt.close()
 
-def plot_loss_vs_epochs(history, filename):
+def plot_loss_vs_epochs(parallel_history, linear_history, filename):
     plt.figure(figsize=(10, 8))
-    plt.plot(history.history['loss'], label='Training Loss')
-    plt.plot(history.history['val_loss'], label='Validation Loss')
+    plt.plot(parallel_history.history['loss'], label='Parallel Processing Loss')
+    plt.plot(linear_history.history['loss'], label='Linear Processing Loss')
     plt.xlabel('Epochs')
     plt.ylabel('Loss')
-    plt.title('Loss vs. Epochs')
+    plt.title('Loss vs. Epochs for Parallel and Linear Processing')
     plt.legend()
     plt.savefig(filename)
     plt.close()
@@ -391,7 +386,7 @@ def main():
         processed_data = preprocess_data(data['train'], data['val'], data['test'])
 
         logging.info("Saving preprocessed data...")
-        save_preprocessed_data(processed_data, PROCESSED_DIR)  # Corrected function name here
+        save_preprocessed_data(processed_data, PROCESSED_DIR)
 
         logging.info("Building and training the model with Ray Tune...")
 
@@ -409,8 +404,8 @@ def main():
 
         # Configure the scheduler and execution
         scheduler = ASHAScheduler(
-            metric="loss",
-            mode="min",
+            metric="accuracy",
+            mode="max",
             max_t=30,
             grace_period=5,
             reduction_factor=2
@@ -432,7 +427,7 @@ def main():
         )
 
         # Fetch the best trial
-        best_trial = result.get_best_trial("loss", "min", "last")
+        best_trial = result.get_best_trial("accuracy", "max", "last")
         logging.info(f"Best trial config: {best_trial.config}")
         logging.info(f"Best trial final validation loss: {best_trial.last_result['loss']}")
         logging.info(f"Best trial final validation accuracy: {best_trial.last_result['accuracy']}")
@@ -467,6 +462,19 @@ def main():
         plot_confusion_matrix(test_performance['confusion_matrix'], os.path.join(FIGURES_DIR, 'confusion_matrix.png'))
         plot_overall_jaccard_score(test_performance['overall_jaccard'], os.path.join(FIGURES_DIR, 'overall_jaccard_score.png'))
         plot_loss_vs_epochs(best_trained_model.history, os.path.join(FIGURES_DIR, 'loss_vs_epochs.png'))
+
+        # Save the hyperparameters of the best model
+        best_model_config_path = os.path.join(OUTPUTS_DIR, "best_model_config.json")
+        with open(best_model_config_path, 'w') as f:
+            json.dump(best_trial.config, f, indent=4)
+        logging.info("Best model hyperparameters saved.")
+
+        # Train parallel and linear models
+        parallel_model, parallel_history, parallel_time = train_model(best_trial.config, processed_data, use_parallel_strategy=True)
+        linear_model, linear_history, linear_time = train_model(best_trial.config, processed_data, use_parallel_strategy=False)
+
+        # Plot loss vs. epochs for both models
+        plot_loss_vs_epochs(parallel_history, linear_history, os.path.join(FIGURES_DIR, 'loss_vs_epochs_parallel_vs_linear.png'))
 
         # Shutdown Ray
         ray.shutdown()
